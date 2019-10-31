@@ -1,6 +1,7 @@
 import numpy as np
 import scipy.constants as sc
 from scipy.special import erf
+import matplotlib.pyplot as plt
 from astropy.convolution import convolve, Gaussian2DKernel
 
 class simple_disk:
@@ -12,13 +13,6 @@ class simple_disk:
         PA (float): Position angle of the source in [degrees].
         x0 (Optional[float]): Source center offset along x-axis in [arcsec].
         y0 (Optional[float]): Source center offset along y-axis in [arcsec].
-        z0 (Optional[float]): Aspect ratio at 1" for the emission surface.
-            To get the far side of the disk, make this number negative.
-        psi (Optional[float]): Flaring angle for the emission surface.
-        z1 (Optional[float]): Aspect ratio correction term at 1" for the
-            emission surface. Should be opposite sign to ``z0``.
-        phi (Optional[float]): Flaring angle correction term for the
-            emission surface.
         dist (Optional[float]): Distance to the source in [pc].
         mstar (Optional[float]): Mass of the central star in [Msun].
         r_in (Optional[float]): Inner radius of the disk in [au].
@@ -36,29 +30,31 @@ class simple_disk:
     fwhm = 2.*np.sqrt(2.*np.log(2.))
     msun = 1.988e30
     
-    def __init__(self, inc, PA, x0=0.0, y0=0.0, z0=0.0, psi=0.0,
-                 z1=0.0, phi=0.0, dist=100.0, mstar=1.0, r_in=1.0,
-                 r_out=250., FOV=3.0, Npix=100, Tb0=40.0, Tbq=-0.5,
-                 dV0=120.0, dVq=-0.3):
+    def __init__(self, inc, PA, x0=0.0, y0=0.0, dist=100.0,
+                 mstar=1.0, r_in=1.0, r_out=250., FOV=3.0, Npix=100,
+                 Tb0=40.0, Tbq=-0.5, dV0=120.0, dVq=-0.3):
         
-        # Define the sky coordinates in [arcsec]. Note the flipped x-axis.
-        self.x_sky = np.linspace(-FOV/2.0, FOV/2.0, Npix)[::-1]
+        # Define the sky coordinates in [arcsec].
+        
+        self.x_sky = np.linspace(-FOV/2.0, FOV/2.0, Npix)
         self.y_sky = np.linspace(-FOV/2.0, FOV/2.0, Npix)
-        self.cell = np.diff(self.y_sky).mean()
         self.x_sky, self.y_sky = np.meshgrid(self.x_sky, self.y_sky)
+        self.cell_sky = np.diff(self.y_sky).mean()
         
         # Define the disk coordinates in [au].
+        
         self.dist = dist
-        self.x_disk = self.x_sky[::-1] * self.dist
+        self.x_disk = self.x_sky * self.dist
         self.y_disk = self.y_sky * self.dist
+        self.cell_disk = np.diff(self.y_disk).mean()
         self.r_disk = np.hypot(self.y_disk, self.x_disk)
         self.t_disk = np.arctan2(self.y_disk, self.x_disk)
         
         # Calculate the projected pixel coordinates in [au].
+        
         self.PA = PA
         self.inc = inc
-        coords = self.disk_coords(x0=x0, y0=y0, inc=inc, PA=PA,
-                                  z0=z0, psi=psi, z1=z1, phi=phi)
+        coords = self.disk_coords(x0=x0, y0=y0, inc=inc, PA=PA)
         self.r_sky = coords[0] * self.dist
         self.t_sky = coords[1]
         self.z_sky = coords[2] * self.dist
@@ -67,8 +63,7 @@ class simple_disk:
         # Note that we don't have a systemic velocity.
         
         self.mstar = mstar
-        self.vkep_mid = self._calculate_vkep(self.r_disk, self.t_disk)
-        self.vkep_proj = self._calculate_vkep(self.r_sky, self.t_sky, self.z_sky, self.inc)
+        self.vkep = self._calculate_vkep(self.r_sky, self.t_sky, self.z_sky, self.inc)
         
         # Use a temperature profile to describe the brightness.
         # Need to think about whether this is necessary.
@@ -109,18 +104,21 @@ class simple_disk:
             r0 (float): Radius in [au] of perturbation center.
             t0 (float): Polar angle in [degrees] of perturbation center.
             dr (float): Radial width of perturbation in [au].
-            dt (float): Azimuthal width (arc length) of perturbation in [au].
-            sky (Optional[bool]): If ``True``, use sky coordinates rather than disk coordinates.
+            dt (float): Azimuthal extent of perturbations in [degrees].
+            sky (Optional[bool]): If ``True``, use sky coordinates rather
+                than disk coordinates.
             
         Returns:
             f (array): 2D array of the Gaussian perturbation.
         """
         if sky:
-            rvals, tvals = self.r_sky, self.t_sky
+            rvals, tvals = self.r_sky, self.t_sky - np.radians(t0)
         else:
-            rvals, tvals = self.r_disk, self.t_disk
+            rvals, tvals = self.r_disk, self.t_disk - np.radians(t0)
         f = np.exp(-0.5*((rvals - r0) / dr)**2.0)
-        return f * np.exp(-0.5*((np.degrees(tvals) - t0) / dt)**2.0)
+        tvals = np.where(tvals < -np.pi, tvals + 2.0*np.pi, tvals)
+        tvals = np.where(tvals > np.pi, tvals - 2.0*np.pi, tvals)
+        return f * np.exp(-0.5*(tvals / np.radians(dt))**2.0)
     
     def _radial_perturbation(self, v, r0, t0, dr, dt, sky=True):
         """
@@ -159,6 +157,10 @@ class simple_disk:
             t0 (float): Polar angle in [degrees] of Doppler flip center.
             dr (float): Radial width of each Gaussian in [au].
             dt (float): Azimuthal width (arc length) of each Gaussian in [au].
+            
+        Returns:
+            dv0 (array): Array of velocity devitiations in [m/s]. If ``sky=True``,
+                these will be projected on the sky.
         """
         rp = r0 + dr0 * dr
         rn = r0 - dr0 * dr
@@ -171,6 +173,36 @@ class simple_disk:
         vp = self._azimuthal_perturbation(v, rp, tp, dr, dt, sky)
         vn = self._azimuthal_perturbation(v, rn, tn, dr, dt, sky)
         return vp - vn
+    
+    def radial_doppler_flip(self, v, r0, t0, dr, dt, dr0=0.5, dt0=1.0, flip_rotation=False, sky=True):
+        """
+        Simple `Doppler flip` model but with radial velocity deviations intead.
+        
+        Args:
+            v (float): Radial velocity deviation in [m/s].
+            r0 (float): Radius in [au] of Doppler flip center.
+            t0 (float): Polar angle in [degrees] of Doppler flip center.
+            dr (float): Radial width of each Gaussian in [au].
+            dt (float): Azimuthal width (arc length) of each Gaussian in [au].
+            
+        Returns:
+            dv0 (array): Array of velocity devitiations in [m/s]. If ``sky=True``,
+                these will be projected on the sky.
+        """
+        rp = r0 + dr0 * dr
+        rn = r0 - dr0 * dr
+        tp = t0 + np.degrees(dt0 * dt / rp)
+        tn = t0 - np.degrees(dt0 * dt / rn)
+        if flip_rotation:
+            temp = tn
+            tn = tp
+            tp = temp
+        vp = self._radial_perturbation(v, rp, tp, dr, dt, sky)
+        vn = self._radial_perturbation(v, rn, tn, dr, dt, sky)
+        return vp - vn
+
+    def vertical_flow(self, v, r0, t0, dr, dt):
+        return
 
     def disk_coords(self, x0=0.0, y0=0.0, inc=0.0, PA=0.0, z0=0.0, psi=0.0,
                     z1=0.0, phi=0.0, frame='cylindrical'):
@@ -300,7 +332,7 @@ class simple_disk:
         self.Tb = simple_disk.powerlaw(self.r_sky / 100., Tb0, Tbq)
 
         
-    def get_cube(self, velax, dv0=0.0, bmaj=None, bmin=None, bpa=0.0, rms=0.0):
+    def get_cube(self, velax, dv0=0.0, bmaj=None, bmin=None, bpa=0.0, rms=0.0, spectral_response=None):
         """
         Return the pseudo-cube with the given velocity axis.
         
@@ -333,6 +365,8 @@ class simple_disk:
             noise = np.random.randn(cube.size).reshape(cube.shape)
             if beam is not None:
                 noise = simple_disk._convolve_cube(noise, beam)
+            if spectral_response is not None:
+                noise = np.convolve(noise, spectral_response, axis=0)
             noise *= rms / np.std(noise)
         else:
             noise = np.zeros(cube.shape)
@@ -355,15 +389,31 @@ class simple_disk:
         return Gaussian2DKernel(bmin, bmaj, np.radians(bpa))
 
     
-    def get_channel(self, dv0=0.0, v_min=None, v_max=None):
+    def get_channel(self, v_min, v_max, dv0=0.0, bmaj=None, bmin=None, bpa=0.0, rms=0.0):
         """Calculate the channel emission in [K] for the given ``v0`` map."""
+        
+        # check the channel boundaries are OK
         v_max = np.median(self.dV) if v_max is None else v_max
         v_min = -v_max if v_min is None else v_min
         assert v_max > v_min, "v_max must be larger than v_min"
+
+        # calculate the flux
+        v0 = self.vkep + dv0
         flux = self.Tb * np.pi**0.5 * self.dV / 2.0 / (v_max - v_min)
-        v0 = self.vkep_proj + dv0
         flux *= erf((v_max - v0) / self.dV) - erf((v_min - v0) / self.dV)
-        return flux
+        
+        # make the beam kernel
+        beam = self._get_beam(bmaj, bmin, bpa) if bmaj is not None else None
+        if beam is not None:
+            flux = convolve(flux, beam)
+            
+        # add noise
+        noise = np.random.randn(flux.size).reshape(flux.shape)
+        if beam is not None:
+            noise = convolve(noise, beam)
+        noise *= rms / np.std(noise)
+        
+        return flux + noise
 
 
     def plot_linewidth(self, fig=None):
@@ -372,13 +422,12 @@ class simple_disk:
             fig, ax = plt.subplots()
         else:
             ax = fig.axes[0]
-        x = self.rvals.flatten()
+        x = self.r_sky.flatten()
         y = self.dV.flatten()
         idxs = np.argsort(x)
         ax.plot(x[idxs], y[idxs])
         ax.set_xlabel('Radius [arcsec]')
         ax.set_ylabel('Linewidth [m/s]')
-        return fig
 
     
     def plot_brightness(self, fig=None):
@@ -387,50 +436,55 @@ class simple_disk:
             fig, ax = plt.subplots()
         else:
             ax = fig.axes[0]
-        x = self.rvals.flatten()
+        x = self.r_sky.flatten()
         y = self.Tb.flatten()
         idxs = np.argsort(x)
         ax.plot(x[idxs], y[idxs])
         ax.set_xlabel('Radius [arcsec]')
-        ax.set_ylabel('Brightest = simple_disk(inc=47.3tness Temperature [K]')
-        return fig
-
+        ax.set_ylabel('BrightestTemperature [K]')
+        
+    @staticmethod
+    def format_sky_plot(ax):
+        """Default formatting for sky image."""
+        ax.set_xlim(ax.get_xlim()[1], ax.get_xlim()[0])
+        ax.set_xlabel('Offset [arcsec]')
+        ax.set_ylabel('Offset [arcsec]')
+        
+    @staticmethod
+    def format_disk_plot(ax):
+        """Default formatting for disk image."""
+        ax.set_xlabel('Offset [au]')
+        ax.set_ylabel('Offset [au]')
     
     @property
-    def extent_arcsec(self):
+    def extent_sky(self):
         return [self.x_sky[0, 0],
                 self.x_sky[0, -1],
                 self.y_sky[0, 0],
                 self.y_sky[-1, 0]]
     
     @property
-    def extent_au(self):
+    def extent_disk(self):
         return [self.x_sky[0, 0] * self.dist,
                 self.x_sky[0, -1] * self.dist,
                 self.y_sky[0, 0] * self.dist,
                 self.y_sky[-1, 0] * self.dist]
     
     @property
-    def x_au(self):
+    def xaxis_disk(self):
         return self.x_disk[0]
     
     @property
-    def y_au(self):
+    def yaxis_disk(self):
         return self.y_disk[:, 0]
 
     @property
-    def x_arcsec(self):
+    def xaxis_sky(self):
         return self.x_sky[0]
     
     @property
-    def y_arcsec(self):
+    def yaxis_sky(self):
         return self.y_sky[:, 0]
-
-    @staticmethod
-    def gaussian(x, x0, dx, A=1.0):
-        return A * np.exp(-((x-x0)/dx)**2)
-        self.xpnts, self.ypnts = np.meshgrid(self.xaxis * self.dist,
-                                             self.yaxis * self.dist)
 
     @staticmethod
     def powerlaw(x, x0, q):
