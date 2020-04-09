@@ -58,10 +58,8 @@ class simple_disk:
 
         # If no linewidth profile is provided, assume thermal broadening.
 
-        if dV0 is None:
-            dV0 = (2. * sc.k * Tb0 / self.mu / sc.m_p)**0.5
-        if dVq is None:
-            dVq = 0.5 * Tbq
+        dV0 = (2. * sc.k * Tb0 / self.mu / sc.m_p)**0.5 if dV0 is None else dV0
+        dVq = 0.5 * Tbq if dVq is None else dVq
         self.set_linewidth(dV0, dVq)
 
     def set_FOV(self, FOV, Npix):
@@ -500,11 +498,11 @@ class simple_disk:
             fig, ax = plt.subplots()
         else:
             ax = fig.axes[0]
-        x = self.r_sky.flatten()
+        x = self.r_sky.flatten() * self.dist
         y = self.dV.flatten()
         idxs = np.argsort(x)
         ax.plot(x[idxs], y[idxs])
-        ax.set_xlabel('Radius [arcsec]')
+        ax.set_xlabel('Radius [au]')
         ax.set_ylabel('Doppler Linewidth [m/s]')
 
     def plot_brightness(self, fig=None):
@@ -513,11 +511,11 @@ class simple_disk:
             fig, ax = plt.subplots()
         else:
             ax = fig.axes[0]
-        x = self.r_sky.flatten()
+        x = self.r_sky.flatten() * self.dist
         y = self.Tb.flatten()
         idxs = np.argsort(x)
         ax.plot(x[idxs], y[idxs])
-        ax.set_xlabel('Radius [arcsec]')
+        ax.set_xlabel('Radius [au]')
         ax.set_ylabel('BrightestTemperature [K]')
 
     @staticmethod
