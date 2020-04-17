@@ -31,7 +31,8 @@ class simple_disk:
     nwrap = 3
 
     def __init__(self, inc, PA, x0=0.0, y0=0.0, dist=100.0, mstar=1.0, FOV=3.0,
-                 Npix=100, Tb0=50.0, Tbq=-1.0, dV0=150.0, dVq=-0.6):
+                 Npix=100, Tb0=50.0, Tbq=-1.0, Tbmax=100, dV0=100.0, dVq=-0.6,
+                 dVmax=300.0):
         self.x0 = x0
         self.y0 = y0
         self.inc = inc
@@ -39,8 +40,8 @@ class simple_disk:
         self.dist = dist
         self.mstar = mstar
         self.set_FOV(FOV=FOV, Npix=Npix)
-        self.set_brightness(Tb0=Tb0, Tbq=Tbq)
-        self.set_linewidth(dV0=dV0, dVq=dVq)
+        self.set_brightness(Tb0=Tb0, Tbq=Tbq, Tbmax=Tbmax)
+        self.set_linewidth(dV0=dV0, dVq=dVq, dVmax=dVmax)
 
     def set_FOV(self, FOV, Npix):
         """
@@ -96,6 +97,46 @@ class simple_disk:
         self.Tb = simple_disk.powerlaw(self.r_sky * self.dist / 100., Tb0, Tbq)
         if Tbmax is not None:
             self.Tb = np.where(self.Tb <= Tbmax, self.Tb, Tbmax)
+
+    def interpolate_model(self, radii, model, parameter, radii_unit='au',
+                          interp1d_kwargs=None):
+        """
+        Interpolate a user-provided model for the brightness temperature
+        profile or the line width.
+
+        Args:
+            radii (array): Array of radii at which the model is sampled at in
+                units given by ``radii_units``, either ``'au'`` or
+                ``'arcsec'``.
+            model (array): Array of model values evaluated at ``radii``. If
+                brightness temperature, in units of [K], or if for linewidth,
+                units of [m/s].
+            parameter (str): Parameter of the model, either ``'Tb'`` for
+                brightness temperature, or ``'dV'`` for linewidth.
+            radii_unit (Optional[str]): Unit of the radii array, either
+                ``'au'`` or ``'arcsec'``.
+            interp1d_kwargs (Optional[dict]): Dictionary of kwargs to pass to
+                ``intep1d`` used for the linear interpolation.
+        """
+        from scipy.interpolate import interp1d
+        if radii.size != model.size:
+            raise ValueError("`radii.size` does not equal `model.size`.")
+        if radii_unit.lower() == 'au':
+            radii /= self.dist
+        elif radii_unit.lower() != 'arcsec':
+            raise ValueError("Unknown `radii_unit` {}.".format(radii_unit))
+        ik = {} if interp1d_kwargs is None else interp1d_kwargs
+        ik['bounds_error'] = ik.pop('bounds_error', False)
+        ik['fill_value'] = ik.pop('fill_value', 'extrapolate')
+        ik['assume_sorted'] = ik.pop('assume_sorted', False)
+        if parameter.lower() == 'tb':
+            self.Tb = interp1d(radii, model, **ik)(self.r_sky)
+            self.Tb = np.where(self.Tb < 0.0, 0.0, self.Tb)
+            self.Tb0, self.Tbq = np.nan, np.nan
+        elif parameter.lower() == 'dv':
+            self.dV = interp1d(radii, model, **ik)(self.r_sky)
+            self.dV = np.where(self.dV < 0.0, 0.0, self.dV)
+            self.dV0, self.dVq = np.nan, np.nan
 
     def _calculate_vkep(self, rvals, tvals, zvals=0.0, inc=90.0):
         """
@@ -293,7 +334,7 @@ class simple_disk:
 
         v0 = self.vkep_sky + dv0
         flux = self.Tb * np.pi**0.5 * self.dV / 2.0 / (v_max - v_min)
-        flux *= erf((v_max - v0) / self.dV) - erf((v_min - v0) / self.dV)
+        flux *= erf((v0 - v_min) / self.dV) - erf((v0 - v_max) / self.dV)
 
         # Include a beam convolution if necessary.
 
