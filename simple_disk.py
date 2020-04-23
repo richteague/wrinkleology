@@ -31,8 +31,8 @@ class simple_disk:
     nwrap = 3
 
     def __init__(self, inc, PA, x0=0.0, y0=0.0, dist=100.0, mstar=1.0, FOV=3.0,
-                 Npix=128, Tb0=50.0, Tbq=-1.0, Tbmax=100, dV0=30.0, dVq=-0.6,
-                 dVmax=100.0, r_max=None, r_min=None):
+                 Npix=128, Tb0=50.0, Tbq=-1.0, Tbmax=100, dV0=200.0, dVq=-0.6,
+                 dVmax=300.0, r_max=None, r_min=None):
         self.x0 = x0
         self.y0 = y0
         self.inc = inc
@@ -40,7 +40,7 @@ class simple_disk:
         self.dist = dist
         self.mstar = mstar
         self.r_min = 0.0 if r_min is None else r_min
-        self.r_max = dist * FOV / 3.0 if r_max is None else r_max
+        self.r_max = dist * FOV / 2.0 if r_max is None else r_max
         self.set_FOV(FOV=FOV, Npix=Npix)
         self.set_brightness(Tb0=Tb0, Tbq=Tbq, Tbmax=Tbmax)
         self.set_linewidth(dV0=dV0, dVq=dVq, dVmax=dVmax)
@@ -354,10 +354,6 @@ class simple_disk:
         flux = self.Tb * np.pi**0.5 * self.dV / 2.0 / (v_max - v_min)
         flux *= erf((v0 - v_min) / self.dV) - erf((v0 - v_max) / self.dV)
 
-        # Include a flux cut off.
-
-        flux = np.where(abs(v0 - v_min) / self.dV <= 3.0, flux, 0.0)
-
         # Include a beam convolution if necessary.
 
         beam = None if bmaj is None else self._get_beam(bmaj, bmin, bpa)
@@ -626,7 +622,7 @@ class simple_disk:
 
     # -- Plotting Routines -- #
 
-    def plot_keplerian(self, fig=None, logy=True):
+    def plot_keplerian(self, fig=None, logy=True, top_axis=True):
         """
         Plot the Keplerian rotation profile.
         """
@@ -642,8 +638,13 @@ class simple_disk:
         ax.set_ylabel('Keplerian Rotation [m/s]')
         if logy:
             ax.set_yscale('log')
+        if top_axis:
+            ax2 = ax.twiny()
+            ax2.set_xlim(ax.get_xlim()[0] / self.dist,
+                         ax.set_xlim()[1] / self.dist)
+            ax2.set_xlabel('Radius [arcsec]')
 
-    def plot_linewidth(self, fig=None):
+    def plot_linewidth(self, fig=None, top_axis=True):
         """
         Plot the linewidth profile.
         """
@@ -657,8 +658,13 @@ class simple_disk:
         ax.plot(x[idxs], y[idxs])
         ax.set_xlabel('Radius [au]')
         ax.set_ylabel('Doppler Linewidth [m/s]')
+        if top_axis:
+            ax2 = ax.twiny()
+            ax2.set_xlim(ax.get_xlim()[0] / self.dist,
+                         ax.set_xlim()[1] / self.dist)
+            ax2.set_xlabel('Radius [arcsec]')
 
-    def plot_brightness(self, fig=None):
+    def plot_brightness(self, fig=None, top_axis=True):
         """
         Plot the brightness temperature profile.
         """
@@ -672,6 +678,11 @@ class simple_disk:
         ax.plot(x[idxs], y[idxs])
         ax.set_xlabel('Radius [au]')
         ax.set_ylabel('BrightestTemperature [K]')
+        if top_axis:
+            ax2 = ax.twiny()
+            ax2.set_xlim(ax.get_xlim()[0] / self.dist,
+                         ax.set_xlim()[1] / self.dist)
+            ax2.set_xlabel('Radius [arcsec]')
 
     def plot_radii(self, ax, rvals, contour_kwargs=None, projection='sky'):
         """
