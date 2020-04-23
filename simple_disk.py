@@ -172,7 +172,7 @@ class simple_disk:
             vkep (array): Projected velocity in [m/s].
         """
         zvals = zvals if zvals is not None else np.zeros(rvals.shape)
-        vkep2 = sc.G * self.mstar * self.msun * rvals
+        vkep2 = sc.G * self.mstar * self.msun * rvals**2.0
         vkep2 /= np.hypot(rvals, zvals)**3.0
         vkep = np.sqrt(vkep2 / sc.au)
         return vkep * np.cos(tvals) * np.sin(np.radians(inc))
