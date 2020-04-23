@@ -31,14 +31,16 @@ class simple_disk:
     nwrap = 3
 
     def __init__(self, inc, PA, x0=0.0, y0=0.0, dist=100.0, mstar=1.0, FOV=3.0,
-                 Npix=100, Tb0=50.0, Tbq=-1.0, Tbmax=100, dV0=100.0, dVq=-0.6,
-                 dVmax=300.0):
+                 Npix=128, Tb0=50.0, Tbq=-1.0, Tbmax=100, dV0=30.0, dVq=-0.6,
+                 dVmax=100.0, r_max=None, r_min=None):
         self.x0 = x0
         self.y0 = y0
         self.inc = inc
         self.PA = PA
         self.dist = dist
         self.mstar = mstar
+        self.r_min = 0.0 if r_min is None else r_min
+        self.r_max = dist * FOV / 3.0 if r_max is None else r_max
         self.set_FOV(FOV=FOV, Npix=Npix)
         self.set_brightness(Tb0=Tb0, Tbq=Tbq, Tbmax=Tbmax)
         self.set_linewidth(dV0=dV0, dVq=dVq, dVmax=dVmax)
@@ -75,6 +77,21 @@ class simple_disk:
         self.t_sky = c[1]
         self.z_sky = c[2]
 
+    def in_disk(self, projection='sky'):
+        """
+        Pixels that are considered in the disk.
+        """
+        if projection.lower() == 'sky':
+            mask = np.logical_and(self.r_sky * self.dist >= self.r_min,
+                                  self.r_sky * self.dist <= self.r_max)
+        elif projection.lower() == 'disk':
+            mask = np.logical_and(self.r_disk >= self.r_min,
+                                  self.r_disk <= self.r_max)
+        else:
+            raise ValueError("Unknown projection {}.".format(projection)
+                             + " Must be 'disk' or 'sky'.")
+        return mask
+
     def set_linewidth(self, dV0=None, dVq=None, dVmax=None):
         """
         Set the radial linewidth profile in [m/s].
@@ -89,14 +106,17 @@ class simple_disk:
         if dVmax is not None:
             self.dV = np.where(self.dV <= dVmax, self.dV, dVmax)
 
-    def set_brightness(self, Tb0, Tbq, Tbmax=None):
+    def set_brightness(self, Tb0, Tbq, Tbmax=None, r_min=None, r_max=None):
         """
         Set the radial brightness temperature profile in [K].
         """
         self.Tb0, self.Tbq = Tb0, Tbq
+        self.r_min = self.r_min if r_min is None else r_min
+        self.r_max = self.r_max if r_max is None else r_max
         self.Tb = simple_disk.powerlaw(self.r_sky * self.dist / 100., Tb0, Tbq)
         if Tbmax is not None:
             self.Tb = np.where(self.Tb <= Tbmax, self.Tb, Tbmax)
+        self.Tb = np.where(self.in_disk(projection='sky'), self.Tb, 0.0)
 
     def interpolate_model(self, radii, model, parameter, radii_unit='au',
                           interp1d_kwargs=None):
@@ -327,14 +347,16 @@ class simple_disk:
 
         v_max = np.median(self.dV) if v_max is None else v_max
         v_min = -v_max if v_min is None else v_min
-        if v_max < v_min:
-            print(v_min, v_max)
 
         # Calculate the flux.
 
         v0 = self.vkep_sky + dv0
         flux = self.Tb * np.pi**0.5 * self.dV / 2.0 / (v_max - v_min)
         flux *= erf((v0 - v_min) / self.dV) - erf((v0 - v_max) / self.dV)
+
+        # Include a flux cut off.
+
+        flux = np.where(abs(v0 - v_min) / self.dV <= 3.0, flux, 0.0)
 
         # Include a beam convolution if necessary.
 
