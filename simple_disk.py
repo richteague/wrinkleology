@@ -30,167 +30,285 @@ class simple_disk:
     msun = 1.988e30
     nwrap = 3
 
-    def __init__(self, inc, PA, x0=0.0, y0=0.0, dist=100.0, mstar=1.0, FOV=3.0,
-                 Npix=128, Tb0=50.0, Tbq=-1.0, Tbmax=100, dV0=200.0, dVq=-0.6,
-                 dVmax=300.0, r_max=None, r_min=None):
-        self.x0 = x0
-        self.y0 = y0
-        self.inc = inc
-        self.PA = PA
-        self.dist = dist
+    def __init__(self, inc, PA, x0=0.0, y0=0.0, mstar=1.0, dist=100.0, z0=0.0,
+                 psi=1.0, z1=0.0, phi=1.0, r_min=0.0, r_max=100.0, Tb0=50.0,
+                 Tbq=-1.0, Tbmax=100.0, Tbmax_b=20.0, dV0=None, dVq=None,
+                 dVmax=300.0, tau0=5.0, tauq=0.0, taumax=None, FOV=None,
+                 Npix=128):
+
+        # Set the disk geometrical properties.
+        self.x0, self.y0, self.inc, self.PA, self.dist = x0, y0, inc, PA, dist
+        self.z0, self.psi, self.z1, self.phi = z0, psi, z1, phi
+        self.r_min, self.r_max = r_min, r_max
+        self.FOV = 2.2 * self.r_max / self.dist if FOV is None else FOV
+        self.Npix = Npix
+
+        # Define the velocity, brightness and linewidth radial profiles.
         self.mstar = mstar
-        self.r_min = 0.0 if r_min is None else r_min
-        self.r_max = dist * FOV / 2.0 if r_max is None else r_max
-        self.set_FOV(FOV=FOV, Npix=Npix)
-        self.set_brightness(Tb0=Tb0, Tbq=Tbq, Tbmax=Tbmax)
-        self.set_linewidth(dV0=dV0, dVq=dVq, dVmax=dVmax)
+        self.Tb0, self.Tbq, self.Tbmax, self.Tbmax_b = Tb0, Tbq, Tbmax, Tbmax_b
+        self.dV0, self.dVq, self.dVmax = dV0, dVq, dVmax
+        self.tau0, self.tauq, self.taumax = tau0, tauq, taumax
 
-    def set_FOV(self, FOV, Npix):
+        # Check if dV should be set by thermal broadening.
+        self._check_thermal_broadening()
+        self._check_optical_depth()
+
+        # Build the disk model.
+        self._populate_coordinates()
+        self._set_brightness()
+        self._set_linewidth()
+        self._set_rotation()
+        self._set_tau()
+
+    # -- Model Building Functions -- #
+
+    def _populate_coordinates(self):
         """
-        Populates the on-sky pixels and deprojected pixels.
+        Populate the coordinates needed for the model.
         """
 
-        # Save the variables.
+        # Set sky cartesian coordinates, representing the pixels in the image.
 
-        self.FOV = FOV
-        self.Npix = int(Npix)
+        self.x_sky = np.linspace(-self.FOV / 2.0, self.FOV / 2.0, self.Npix)
+        self.cell_sky = np.diff(self.x_sky).mean()
+        self.x_sky, self.y_sky = np.meshgrid(self.x_sky, self.x_sky)
 
-        # Define the sky coordinates in [arcsec].
-
-        self.x_sky = np.linspace(-FOV/2.0, FOV/2.0, Npix)
-        self.y_sky = np.linspace(-FOV/2.0, FOV/2.0, Npix)
-        self.cell_sky = np.diff(self.y_sky).mean()
-        self.x_sky, self.y_sky = np.meshgrid(self.x_sky, self.y_sky)
-
-        # Define the disk coordinates in [au].
+        # Use these pixels to define face-down disk-centric coordinates.
 
         self.x_disk = self.x_sky * self.dist
         self.y_disk = self.y_sky * self.dist
+        self.cell_disk = np.diff(self.x_disk).mean()
+
+        # Define three sets of cylindrical coordintes, the two emission
+        # surfaces and the midplane. If `z0 = 0.0` then the two emission
+        # surfaces are equal.
+
         self.r_disk = np.hypot(self.y_disk, self.x_disk)
         self.t_disk = np.arctan2(self.y_disk, self.x_disk)
-        self.cell_disk = np.diff(self.y_disk).mean()
 
-        # Calculate the projected pixel coordinates in [arcsec].
+        f = self.disk_coords(x0=self.x0, y0=self.y0, inc=self.inc, PA=self.PA,
+                             z0=self.z0, psi=self.psi, z1=self.z1,
+                             phi=self.phi)
 
-        c = self.disk_coords(x0=self.x0, y0=self.y0, inc=self.inc, PA=self.PA)
-        self.r_sky = c[0]
-        self.t_sky = c[1]
-        self.z_sky = c[2]
+        self.r_sky_f = f[0] * self.dist
+        self.t_sky_f = f[1]
+        self.z_sky_f = f[2] * self.dist
 
-    def in_disk(self, projection='sky'):
-        """
-        Pixels that are considered in the disk.
-        """
-        if projection.lower() == 'sky':
-            mask = np.logical_and(self.r_sky * self.dist >= self.r_min,
-                                  self.r_sky * self.dist <= self.r_max)
-        elif projection.lower() == 'disk':
-            mask = np.logical_and(self.r_disk >= self.r_min,
-                                  self.r_disk <= self.r_max)
+        if self.z0 != 0.0:
+            self._flat_disk = False
+            b = self.disk_coords(x0=self.x0, y0=self.y0, inc=-self.inc,
+                                 PA=self.PA, z0=self.z0, psi=self.psi,
+                                 z1=self.z1, phi=self.phi)
         else:
-            raise ValueError("Unknown projection {}.".format(projection)
-                             + " Must be 'disk' or 'sky'.")
-        return mask
+            self._flat_disk = True
+            b = f
 
-    def set_linewidth(self, dV0=None, dVq=None, dVmax=None):
-        """
-        Set the radial linewidth profile in [m/s].
-        """
-        if dV0 is None:
-            dV0 = (2. * sc.k * self.Tb0 / self.mu / sc.m_p)**0.5
-        if dVq is None:
-            dVq = 0.5 * self.Tbq
-        self.dV0, self.dVq = dV0, dVq
-        self.dV = simple_disk.powerlaw(self.r_sky * self.dist / 100.,
-                                       self.dV0, self.dVq)
-        if dVmax is not None:
-            self.dV = np.where(self.dV <= dVmax, self.dV, dVmax)
+        self.r_sky_b = b[0] * self.dist
+        self.t_sky_b = b[1]
+        self.z_sky_b = b[2] * self.dist
 
-    def set_brightness(self, Tb0, Tbq, Tbmax=None, r_min=None, r_max=None):
-        """
-        Set the radial brightness temperature profile in [K].
-        """
-        self.Tb0, self.Tbq = Tb0, Tbq
-        self.r_min = self.r_min if r_min is None else r_min
-        self.r_max = self.r_max if r_max is None else r_max
-        self.Tb = simple_disk.powerlaw(self.r_sky * self.dist / 100., Tb0, Tbq)
-        if Tbmax is not None:
-            self.Tb = np.where(self.Tb <= Tbmax, self.Tb, Tbmax)
-        self.Tb = np.where(self.in_disk(projection='sky'), self.Tb, 0.0)
+        # Define masks noting where the disk extends to.
 
-    def interpolate_model(self, radii, model, parameter, radii_unit='au',
-                          interp1d_kwargs=None):
+        self._in_disk_f = np.logical_and(self.r_sky_f >= self.r_min,
+                                         self.r_sky_f <= self.r_max)
+        self._in_disk_b = np.logical_and(self.r_sky_b >= self.r_min,
+                                         self.r_sky_b <= self.r_max)
+        self._in_disk = np.logical_and(self.r_disk >= self.r_min,
+                                       self.r_disk <= self.r_max)
+
+    @property
+    def r_sky(self):
+        return self.r_sky_f
+
+    @property
+    def t_sky(self):
+        return self.t_sky_f
+
+    @property
+    def v0_sky(self):
+        return self.v0_f
+
+    def _check_thermal_broadening(self):
+        """
+        Set the Doppler linewidth to the themral linewidth if no ``dV0`` or
+        ``dVq`` values are provided when instantiating the class.
+        """
+        if self.dV0 is None:
+            self.dV0 = (2. * sc.k * self.Tb0 / self.mu / sc.m_p)**0.5
+        if self.dVq is None:
+            self.dVq = 0.5 * self.Tbq
+
+    def _check_optical_depth(self):
+        """
+        Set the optical depth parameters if they were not set when the class
+        was instantiated.
+        """
+        if self.tau0 is None:
+            self.tau0 = 0.0
+        if self.tauq is None:
+            self.tauq = self.Tbq
+        if self.taumax is None:
+            self.taumax = 100.0
+
+    def _set_linewidth(self):
+        """
+        Sets the Doppler linewidth profile in [m/s].
+        """
+        self.dV_f = self.dV0 * np.power(self.r_sky_f / 100.0, self.dVq)
+        self.dV_f = np.clip(self.dV_f, 0.0, self.dVmax)
+        if self._flat_disk:
+            self.dV_b = None
+        else:
+            self.dV_b = self.dV0 * np.power(self.r_sky_b / 100.0, self.dVq)
+            self.dV_b = np.clip(self.dV_b, 0.0, self.dVmax)
+
+    def _set_brightness(self):
+        """
+        Sets the brightness profile in [K].
+        """
+        self.Tb_f = self.Tb0 * np.power(self.r_sky_f / 100.0, self.Tbq)
+        self.Tb_f = np.clip(self.Tb_f, 0.0, self.Tbmax)
+        self.Tb_f = np.where(self._in_disk_f, self.Tb_f, 0.0)
+        if self._flat_disk:
+            self.Tb_b = None
+        else:
+            self.Tb_b = self.Tb0 * np.power(self.r_sky_b / 100.0, self.Tbq)
+            self.Tb_b = np.clip(self.Tb_b, 0.0, self.Tbmax_b)
+            self.Tb_b = np.where(self._in_disk_b, self.Tb_b, 0.0)
+
+    def _set_rotation(self):
+        """
+        Sets the projected rotation profile in [m/s].
+        """
+        self.v0_f = self._calculate_projected_vkep(self.r_sky_f,
+                                                   self.z_sky_f,
+                                                   self.t_sky_f,
+                                                   self.inc)
+        if self._flat_disk:
+            self.v0_b = None
+        else:
+            self.v0_b = self._calculate_projected_vkep(self.r_sky_b,
+                                                       self.z_sky_b,
+                                                       self.t_sky_b,
+                                                       self.inc)
+        return
+
+    def _set_tau(self):
+        """
+        Sets the tau radial profile.
+        """
+        self.tau = self.tau0 * np.power(self.r_sky_f / 100., self.tauq)
+        self.tau = np.where(self._in_disk_f, self.tau, 0.0)
+
+    def interpolate_model(self, x, y, param, x_unit='au', param_max=None,
+                          interp1d_kw=None):
         """
         Interpolate a user-provided model for the brightness temperature
         profile or the line width.
 
         Args:
-            radii (array): Array of radii at which the model is sampled at in
-                units given by ``radii_units``, either ``'au'`` or
-                ``'arcsec'``.
-            model (array): Array of model values evaluated at ``radii``. If
-                brightness temperature, in units of [K], or if for linewidth,
-                units of [m/s].
-            parameter (str): Parameter of the model, either ``'Tb'`` for
-                brightness temperature, or ``'dV'`` for linewidth.
-            radii_unit (Optional[str]): Unit of the radii array, either
+            x (array): Array of radii at which the model is sampled at in units
+                given by ``x_units``, either ``'au'`` or ``'arcsec'``.
+            y (array): Array of model values evaluated at ``x``. If brightness
+                temperature, in units of [K], or for linewidth, units of [m/s].
+            param (str): Parameter of the model, either ``'Tb'`` for brightness
+                temperature, or ``'dV'`` for linewidth.
+            x_unit (Optional[str]): Unit of the ``x`` array, either
                 ``'au'`` or ``'arcsec'``.
-            interp1d_kwargs (Optional[dict]): Dictionary of kwargs to pass to
-                ``intep1d`` used for the linear interpolation.
+            param_max (Optional[float]): If provided, use as the maximum value
+                for the provided parameter (overwriting previous values).
+            interp1d_kw (Optional[dict]): Dictionary of kwargs to pass to
+                ``scipy.interpolate.intep1d`` used for the linear
+                interpolation.
         """
         from scipy.interpolate import interp1d
-        if radii.size != model.size:
-            raise ValueError("`radii.size` does not equal `model.size`.")
-        if radii_unit.lower() == 'au':
-            radii /= self.dist
-        elif radii_unit.lower() != 'arcsec':
-            raise ValueError("Unknown `radii_unit` {}.".format(radii_unit))
-        ik = {} if interp1d_kwargs is None else interp1d_kwargs
+
+        # Value the input models.
+
+        if x.size != y.size:
+            raise ValueError("`x.size` does not equal `y.size`.")
+        if x_unit.lower() == 'arcsec':
+            x *= self.dist
+        elif x_unit.lower() != 'au':
+            raise ValueError("Unknown `radii_unit` {}.".format(x_unit))
+        if y[0] != 0.0 or y[-1] != 0.0:
+            print("First or last value of `y` is non-zero and may cause " +
+                  "issues with extrapolated values.")
+
+        # Validate the kwargs passed to interp1d.
+
+        ik = {} if interp1d_kw is None else interp1d_kw
         ik['bounds_error'] = ik.pop('bounds_error', False)
         ik['fill_value'] = ik.pop('fill_value', 'extrapolate')
         ik['assume_sorted'] = ik.pop('assume_sorted', False)
-        if parameter.lower() == 'tb':
-            self.Tb = interp1d(radii, model, **ik)(self.r_sky)
-            self.Tb = np.where(self.Tb < 0.0, 0.0, self.Tb)
-            self.Tb0, self.Tbq = np.nan, np.nan
-        elif parameter.lower() == 'dv':
-            self.dV = interp1d(radii, model, **ik)(self.r_sky)
-            self.dV = np.where(self.dV < 0.0, 0.0, self.dV)
-            self.dV0, self.dVq = np.nan, np.nan
 
-    def _calculate_vkep(self, rvals, tvals, zvals=0.0, inc=90.0):
+        # Interpolate the functions onto the coordinate grids.
+
+        if param.lower() == 'tb':
+            self.Tb_f = interp1d(x, y, **ik)(self.r_sky_f)
+            self.Tb_f = np.clip(self.Tb_f, 0.0, param_max)
+            if self.r_sky_b is not None:
+                self.Tb_b = interp1d(x, y, **ik)(self.r_sky_b)
+                self.Tb_b = np.clip(self.Tb_b, 0.0, param_max)
+            self.Tb0, self.Tbq, self.Tbmax = np.nan, np.nan, param_max
+
+        elif param.lower() == 'dv':
+            self.dV_f = interp1d(x, y, **ik)(self.r_sky_f)
+            self.dV_f = np.clip(self.dV_f, 0.0, param_max)
+            if self.r_sky_b is not None:
+                self.dV_b = interp1d(x, y, **ik)(self.r_sky_b)
+                self.dV_b = np.clip(self.dV_b, 0.0, param_max)
+            self.dV0, self.dVq, self.dVmax = np.nan, np.nan, param_max
+
+        elif param.lower() == 'tau':
+            self.tau = interp1d(x, y, **ik)(self.r_sky_f)
+            self.tau = np.clip(self.tau, 0.0, param_max)
+
+        else:
+            raise ValueError("Unknown 'param' value {}.".format(param))
+
+    @property
+    def v0_disk(self):
         """
-        Calculate the Keplerian velocity field, including vertical shear.
+        Disk-frame rotation profile.
+        """
+        v0 = self._calculate_projected_vkep(self.r_disk, 0.0)
+        return np.where(self._in_disk, v0, np.nan)
+
+    @property
+    def Tb_disk(self):
+        """
+        Disk-frame brightness profile.
+        """
+        Tb = self.Tb0 * np.power(self.r_disk / 100.0, self.Tbq)
+        return np.where(self._in_disk, Tb, np.nan)
+
+    @property
+    def dV_disk(self):
+        """
+        Disk-frame brightness profile.
+        """
+        dV = self.dV0 * np.power(self.r_disk / 100.0, self.dVq)
+        return np.where(self._in_disk, dV, np.nan)
+
+    def _calculate_projected_vkep(self, r, z, t=0.0, inc=90.0):
+        """
+        Calculates the projected Keplerian rotation profile based on the
+        attached stellar mass and source distance and inclination.
 
         Args:
-            rvals (array): Midplane radii in [au].
-            tvals (array): Midplane polar angles in [radians].
-            zvals (Optional[array]): Height of emission surface in [au].
-            inc (Optional[float]): Inclination of the disk in [degrees].
+            r (float/array): Cylindrical radius in [au].
+            z (float/array): Cylindrical  height in [au].
+            t (Optional[float/array]): Polar angle in [rad].
+            inc (Optional[float]): Dist inclination in [deg].
 
         Returns:
-            vkep (array): Projected velocity in [m/s].
+            vkep (float/array): Projected Keplerian velocity in [m/s].
         """
-        zvals = zvals if zvals is not None else np.zeros(rvals.shape)
-        vkep2 = sc.G * self.mstar * self.msun * rvals**2.0
-        vkep2 /= np.hypot(rvals, zvals)**3.0
+        vkep2 = sc.G * self.mstar * self.msun * r**2.0
+        vkep2 /= np.hypot(r, z)**3.0
         vkep = np.sqrt(vkep2 / sc.au)
-        return vkep * np.cos(tvals) * np.sin(np.radians(inc))
-
-    @property
-    def vkep_sky(self):
-        """
-        Projected Keplerian rotation.
-        """
-        return self._calculate_vkep(self.r_sky * self.dist, self.t_sky,
-                                    self.z_sky * self.dist, self.inc)
-
-    @property
-    def vkep_disk(self):
-        """
-        Disk-frame Keplerian rotation.
-        """
-        return self._calculate_vkep(self.r_disk, 0.0 * self.t_disk)
+        return vkep * np.cos(t) * abs(np.sin(np.radians(inc)))
 
     # -- Deprojection Functions -- #
 
@@ -245,55 +363,71 @@ class simple_disk:
         if frame not in ['cylindrical', 'cartesian']:
             raise ValueError("frame must be 'cylindrical' or 'cartesian'.")
 
-        # Define the emission surface function. Use the simple double
-        # power-law profile.
-
-        def z_func(r):
-            z = z0 * np.power(r, psi) + z1 * np.power(r, phi)
-            if z0 >= 0.0:
-                return np.clip(z, a_min=0.0, a_max=None)
-            return np.clip(z, a_min=None, a_max=0.0)
-
         # Calculate the pixel values.
-        r, t, z = self._get_flared_coords(x0, y0, inc, PA, z_func)
+
+        r, t, z = self._get_flared_coords(x0, y0, inc, PA, self._z_func)
         if frame == 'cylindrical':
             return r, t, z
         return r * np.cos(t), r * np.sin(t), z
 
+    def _z_func(self, r):
+        """
+        Returns the emission height in [arcsec].
+        """
+        z = self.z0 * np.power(r * self.dist / 100.0, self.psi) / self.dist
+        z += self.z1 * np.power(r * self.dist / 100.0, self.phi) / self.dist
+        if self.z0 >= 0.0:
+            return np.clip(z, a_min=0.0, a_max=None)
+        return np.clip(z, a_min=None, a_max=0.0)
+
     @staticmethod
     def _rotate_coords(x, y, PA):
-        """Rotate (x, y) by PA [deg]."""
+        """
+        Rotate (x, y) by PA [deg].
+        """
         x_rot = y * np.cos(np.radians(PA)) + x * np.sin(np.radians(PA))
         y_rot = x * np.cos(np.radians(PA)) - y * np.sin(np.radians(PA))
         return x_rot, y_rot
 
     @staticmethod
     def _deproject_coords(x, y, inc):
-        """Deproject (x, y) by inc [deg]."""
+        """
+        Deproject (x, y) by inc [deg].
+        """
         return x, y / np.cos(np.radians(inc))
 
     def _get_cart_sky_coords(self, x0, y0):
-        """Return caresian sky coordinates in [arcsec, arcsec]."""
+        """
+        Return caresian sky coordinates in [arcsec, arcsec].
+        """
         return self.x_sky - x0, self.y_sky - y0
 
     def _get_polar_sky_coords(self, x0, y0):
-        """Return polar sky coordinates in [arcsec, radians]."""
+        """
+        Return polar sky coordinates in [arcsec, radians].
+        """
         x_sky, y_sky = self._get_cart_sky_coords(x0, y0)
         return np.hypot(y_sky, x_sky), np.arctan2(x_sky, y_sky)
 
     def _get_midplane_cart_coords(self, x0, y0, inc, PA):
-        """Return cartesian coordaintes of midplane in [arcsec, arcsec]."""
+        """
+        Return cartesian coordaintes of midplane in [arcsec, arcsec].
+        """
         x_sky, y_sky = self._get_cart_sky_coords(x0, y0)
         x_rot, y_rot = simple_disk._rotate_coords(x_sky, y_sky, PA)
         return simple_disk._deproject_coords(x_rot, y_rot, inc)
 
     def _get_midplane_polar_coords(self, x0, y0, inc, PA):
-        """Return the polar coordinates of midplane in [arcsec, radians]."""
+        """
+        Return the polar coordinates of midplane in [arcsec, radians].
+        """
         x_mid, y_mid = self._get_midplane_cart_coords(x0, y0, inc, PA)
         return np.hypot(y_mid, x_mid), np.arctan2(y_mid, x_mid)
 
     def _get_flared_coords(self, x0, y0, inc, PA, z_func):
-        """Return cylindrical coordinates of surface in [arcsec, radians]."""
+        """
+        Return cylindrical coordinates of surface in [arcsec, radians].
+        """
         x_mid, y_mid = self._get_midplane_cart_coords(x0, y0, inc, PA)
         r_tmp, t_tmp = np.hypot(x_mid, y_mid), np.arctan2(y_mid, x_mid)
         for _ in range(5):
@@ -304,71 +438,88 @@ class simple_disk:
 
     @property
     def xaxis_disk(self):
+        """
+        X-axis for the disk coordinates in [au].
+        """
         return self.x_disk[0]
 
     @property
     def yaxis_disk(self):
+        """
+        y-axis for the disk coordinates in [au].
+        """
         return self.y_disk[:, 0]
 
     @property
     def xaxis_sky(self):
+        """
+        X-axis for the sky coordinates in [arcsec].
+        """
         return self.x_sky[0]
 
     @property
     def yaxis_sky(self):
+        """
+        Y-axis for the sky coordinates in [arcsec].
+        """
         return self.y_sky[:, 0]
 
-    # -- Pseudo Images -- #
+    # -- Helper Functions -- #
 
-    def get_channel(self, v_min, v_max, dv0=0.0, bmaj=None, bmin=None, bpa=0.0,
-                    rms=0.0):
+    def set_coordinates(self, x0=None, y0=None, inc=None, PA=None, dist=None,
+                        z0=None, psi=None, r_min=None, r_max=None, FOV=None,
+                        Npix=None):
         """
-        Calculate the channel emission in [K]. Can include velocity
-        perturbations with the `dv0` parameter. To simulate observations this
-        can include convolution with a 2D Gaussian beam or the addition of
-        (correlated) noise.
-
-        Args:
-            v_min (float): The minimum velocity of the channel in [m/s].
-            v_max (float): The maximum velocity of the channel in [m/s].
-            dv0 (optional[ndarray]): An array of projected velocity
-                perturbations in [m/s].
-            bmaj (optional[float]): Synthesised beam major axis in [arcsec].
-            bmin (optional[float]): Synthesised beam minor axis in [arcsec]. If
-                only `bmaj` is specified, will assume a circular beam.
-            bpa (optional[float]): Beam position angle in [deg].
-            rms (optional[float]): RMS of the noise to add to the image.
-
-        Returns:
-            channel (ndarray): A synthesied channel map in [K].
+        Helper function to redefine the coordinate system.
         """
+        self.x0 = self.x0 if x0 is None else x0
+        self.y0 = self.y0 if y0 is None else y0
+        self.inc = self.inc if inc is None else inc
+        self.PA = self.PA if PA is None else PA
+        self.dist = self.dist if dist is None else dist
+        self.z0 = self.z0 if z0 is None else z0
+        self.psi = self.psi if psi is None else psi
+        self.r_min = self.r_min if r_min is None else r_min
+        self.r_max = self.r_max if r_max is None else r_max
+        self.FOV = self.FOV if FOV is None else FOV
+        self.Npix = self.Npix if Npix is None else Npix
+        self._populate_coordinates()
+        self._set_brightness()
+        self._set_linewidth()
+        self._set_rotation()
+        self._set_tau()
 
-        # Check the channel boundaries are OK.
+    def set_brightness(self, Tb0=None, Tbq=None, Tbmax=None, Tbmax_b=None):
+        """
+        Helper function to redefine the brightnes profile.
+        """
+        self.Tb0 = self.Tb0 if Tb0 is None else Tb0
+        self.Tbq = self.Tbq if Tbq is None else Tbq
+        self.Tbmax = self.Tbmax if Tbmax is None else Tbmax
+        self.Tbmax_b = self.Tbmax_b if Tbmax_b is None else Tbmax_b
+        self._set_brightness()
 
-        v_max = np.median(self.dV) if v_max is None else v_max
-        v_min = -v_max if v_min is None else v_min
+    def set_linewidth(self, dV0=None, dVq=None, dVmax=None):
+        """
+        Helper function to redefine the Doppler linewidth profile.
+        """
+        self.dV0 = self.dV0 if dV0 is None else dV0
+        self.dVq = self.dVq if dVq is None else dVq
+        self.dVmax = self.dVmax if dVmax is None else dVmax
+        self._set_linewidth()
 
-        # Calculate the flux.
+    def set_tau(self, tau0=None, tauq=None, taumax=None):
+        """
+        Helper function to redefine the optical depth profile.
+        """
+        self.tau0 = self.tau0 if tau0 is None else tau0
+        self.tauq = self.tauq if tauq is None else tauq
+        self.taumax = self.taumax if taumax is None else taumax
+        self._set_tau()
 
-        v0 = self.vkep_sky + dv0
-        flux = self.Tb * np.pi**0.5 * self.dV / 2.0 / (v_max - v_min)
-        flux *= erf((v0 - v_min) / self.dV) - erf((v0 - v_max) / self.dV)
+    # -- Pseudo Image Functions -- #
 
-        # Include a beam convolution if necessary.
-
-        beam = None if bmaj is None else self._get_beam(bmaj, bmin, bpa)
-        if beam is not None:
-            flux = convolve(flux, beam)
-
-        # Add noise and return.
-
-        noise = np.random.randn(flux.size).reshape(flux.shape)
-        if beam is not None:
-            noise = convolve(noise, beam)
-        noise *= rms / np.std(noise)
-        return flux + noise
-
-    def get_cube(self, velax, dv0=0.0, bmaj=None, bmin=None, bpa=0.0, rms=0.0,
+    def get_cube(self, velax, dv0=None, bmaj=None, bmin=None, bpa=0.0, rms=0.0,
                  spectral_response=None):
         """
         Return the pseudo-cube with the given velocity axis.
@@ -423,13 +574,150 @@ class simple_disk:
             noise = np.zeros(cube.shape)
         return cube + noise
 
+    def get_channel(self, v_min, v_max, dv0=None, bmaj=None, bmin=None,
+                    bpa=0.0, rms=0.0):
+        """
+        Calculate the channel emission in [K]. Can include velocity
+        perturbations with the `dv0` parameter. To simulate observations this
+        can include convolution with a 2D Gaussian beam or the addition of
+        (correlated) noise.
+
+        Args:
+            v_min (float): The minimum velocity of the channel in [m/s].
+            v_max (float): The maximum velocity of the channel in [m/s].
+            dv0 (optional[ndarray]): An array of projected velocity
+                perturbations in [m/s].
+            bmaj (optional[float]): Synthesised beam major axis in [arcsec].
+            bmin (optional[float]): Synthesised beam minor axis in [arcsec]. If
+                only `bmaj` is specified, will assume a circular beam.
+            bpa (optional[float]): Beam position angle in [deg].
+            rms (optional[float]): RMS of the noise to add to the image.
+
+        Returns:
+            channel (ndarray): A synthesied channel map in [K].
+        """
+
+        # Check the channel boundaries are OK.
+
+        v_max = np.median(self.dV) if v_max is None else v_max
+        v_min = -v_max if v_min is None else v_min
+
+        # Check to see if there are one or two perturbations provided.
+
+        try:
+            dv0_f, dv0_b = dv0
+        except ValueError:
+            dv0_f = dv0
+        except TypeError:
+            dv0_f = np.zeros(self.r_sky_f.shape)
+            dv0_b = dv0_f.copy()
+
+        # Calculate the flux from the front side of the disk.
+
+        flux_f = self._calc_flux(v_min, v_max, dv0_f, 'f')
+
+        # If `z0 != 0.0`, can combine the front and far sides based on a
+        # two-slab approximation.
+
+        if not self._flat_disk:
+            flux_b = self._calc_flux(v_min, v_max, dv0_b, 'b')
+            frac_f, frac_b = self._calc_frac(v_min, v_max, dv0_b)
+            flux = frac_f * flux_f + frac_b * flux_b
+        else:
+            flux = flux_f
+
+        # Include a beam convolution if necessary.
+
+        beam = None if bmaj is None else self._get_beam(bmaj, bmin, bpa)
+        if beam is not None:
+            flux = convolve(flux, beam)
+
+        # Add noise and return.
+
+        noise = np.random.randn(flux.size).reshape(flux.shape)
+        if beam is not None:
+            noise = convolve(noise, beam)
+        noise *= rms / np.std(noise)
+        return flux + noise
+
+    def get_channel_tau(self, v_min, v_max, dv0=0.0, bmaj=None, bmin=None,
+                        bpa=0.0):
+        """
+        As ``get_channel``, but returns the optical depth of the front side of
+        the disk.
+
+        Args:
+            v_min (float): The minimum velocity of the channel in [m/s].
+            v_max (float): The maximum velocity of the channel in [m/s].
+            dv0 (optional[ndarray]): An array of projected velocity
+                perturbations in [m/s].
+            bmaj (optional[float]): Synthesised beam major axis in [arcsec].
+            bmin (optional[float]): Synthesised beam minor axis in [arcsec]. If
+                only `bmaj` is specified, will assume a circular beam.
+            bpa (optional[float]): Beam position angle in [deg].
+
+        Returns:
+            channel (ndarray): A synthesied channel map representing the
+                optical depth.
+        """
+
+        # Check the channel boundaries are OK.
+
+        v_max = np.median(self.dV) if v_max is None else v_max
+        v_min = -v_max if v_min is None else v_min
+
+        # Calculate the optical depth.
+
+        tau = self._calc_tau(v_min=v_min, v_max=v_max, dv0=dv0)
+
+        # Include a beam convolution if necessary.
+
+        beam = None if bmaj is None else self._get_beam(bmaj, bmin, bpa)
+        if beam is not None:
+            tau = convolve(tau, beam)
+        return tau
+
+    def _calc_tau(self, v_min, v_max, dv0=0.0):
+        """
+        Calculate the average tau profile assuming a single Gaussian component.
+        """
+        tau, dV, v0 = self.tau, self.dV_f, self.v0_f + dv0
+        f = tau * np.pi**0.5 * dV / 2.0 / (v_max - v_min)
+        return f * (erf((v0 - v_min) / dV) - erf((v0 - v_max) / dV))
+
+    def _calc_flux(self, v_min, v_max, dv0=0.0, side='f'):
+        """
+        Calculate the emergent flux assuming single Gaussian component.
+        """
+        if side.lower() == 'f':
+            Tb, dV, v0 = self.Tb_f, self.dV_f, self.v0_f + dv0
+        elif side.lower() == 'b':
+            Tb, dV, v0 = self.Tb_b, self.dV_b, self.v0_b + dv0
+        else:
+            quote = "Unknown 'side' value {}. Must be 'f' or 'r'."
+            raise ValueError(quote.format(side))
+        f = Tb * np.pi**0.5 * dV / 2.0 / (v_max - v_min)
+        return f * (erf((v0 - v_min) / dV) - erf((v0 - v_max) / dV))
+
+    def _calc_frac(self, v_min, v_max, dv0=0.0):
+        """
+        Calculates the fraction of the front side of the disk realtive to the
+        back side based on the optical depth.
+        """
+        tau = self._calc_tau(v_min=v_min, v_max=v_max, dv0=dv0)
+        return 1.0 - np.exp(-tau), np.exp(-tau)
+
     @staticmethod
     def _convolve_cube(cube, beam):
-        """Convolve the cube."""
+        """
+        Convolve the cube.
+        """
         return np.array([convolve(c, beam) for c in cube])
 
     def _get_beam(self, bmaj, bmin=None, bpa=0.0):
-        """Make a 2D Gaussian kernel for convolution."""
+        """
+        Make a 2D Gaussian kernel for convolution.
+        """
         bmin = bmaj if bmin is None else bmin
         bmaj /= self.cell_sky * self.fwhm
         bmin /= self.cell_sky * self.fwhm
@@ -448,7 +736,8 @@ class simple_disk:
         Args:
             r0 (float): Radius of perturbation center. If ``projection='sky'``
                 this is in [arcsec], while for ``projection='disk'`` this is in
-                [au].
+                [au]. For elevated emission surfaces this can additionally be
+                ``'f'`` for the front side, or ``'b'`` for the back side.
             t0 (float): Polar angle in [degrees] of perturbation center.
             dr (float): Radial width of perturbation. If ``projection='sky'``
                 this is in [arcsec], while for ``projection='disk'`` this is in
@@ -467,12 +756,14 @@ class simple_disk:
 
         # Parse input variables.
 
-        if projection.lower() == 'sky':
-            rvals, tvals = self.r_sky, self.t_sky
+        if projection.lower() == 'sky' or projection.lower() == 'f':
+            rvals, tvals = self.r_sky / self.dist, self.t_sky
+        elif projection.lower() == 'b':
+            rvals, tvals = self.r_sky_b / self.dist, self.t_sky_b
         elif projection.lower() == 'disk':
             rvals, tvals = self.r_disk, self.t_disk
         else:
-            raise ValueError("`projection` must be 'sky' or 'disk'.")
+            raise ValueError("`projection` must be 'sky', 'f', 'b' or 'disk'.")
         if dt == 0.0 and beta != 0.0:
             raise ValueError("Cannot specify pitch angle and `dt=0.0`.")
 
@@ -495,13 +786,10 @@ class simple_disk:
             f += [_f * np.exp(-0.5*(t_tmp / np.radians(dt))**2.0)]
         f = np.sum(f, axis=0)
 
-        # Apply trims.
+        # Apply trims and return.
 
         if trim_values:
             f = np.where(abs(f) > trim_values, f, np.nan)
-
-        # Return
-
         return f
 
     def radial_perturbation(self, dv, r0, t0, dr, dt=0.0, beta=0.0,
@@ -514,19 +802,40 @@ class simple_disk:
                                     trim_values=trim_values)
         if projection.lower() == 'disk':
             return f
-        return f * np.sin(self.t_sky) * np.sin(self.inc)
+        return f * np.sin(self.t_sky) * np.sin(np.radians(self.inc))
 
     def rotational_perturbation(self, dv, r0, t0, dr, dt=0.0, beta=0.0,
                                 projection='sky', trim_values=False):
         """
         Gaussian perturbation with rotational velocity projection.
         """
-        f = dv * self._perturbation(r0=r0, t0=t0, dr=dr, dt=dt, beta=beta,
-                                    projection=projection,
-                                    trim_values=trim_values)
+
+        # Disk projection.
+
         if projection.lower() == 'disk':
+            return dv * self._perturbation(r0=r0, t0=t0, dr=dr, dt=dt,
+                                           beta=beta, projection='disk',
+                                           trim_values=trim_values)
+
+        elif not projection.lower() == 'sky':
+            raise ValueError("'projection' must be 'sky' or 'disk'.")
+
+        # If a sky projection, check to see if two sides are needed.
+
+        f = dv * self._perturbation(r0=r0, t0=t0, dr=dr, dt=dt,
+                                    beta=beta, projection='f',
+                                    trim_values=trim_values)
+        f *= np.cos(self.t_sky_f) * np.sin(np.radians(self.inc))
+
+        if self._flat_disk:
             return f
-        return f * np.cos(self.t_sky) * np.sin(self.inc)
+
+        b = dv * self._perturbation(r0=r0, t0=t0, dr=dr, dt=dt,
+                                    beta=beta, projection='b',
+                                    trim_values=trim_values)
+        b *= np.cos(self.t_sky_f) * np.sin(np.radians(self.inc))
+
+        return f, b
 
     def vertical_perturbation(self, dv, r0, t0, dr, dt=0.0, beta=0.0,
                               projection='sky', trim_values=False):
@@ -618,6 +927,7 @@ class simple_disk:
         return v
 
     def vertical_flow(self, v, r0, t0, dr, dt):
+        raise NotImplementedError("Coming soon. Maybe.")
         return
 
     # -- Plotting Routines -- #
@@ -631,7 +941,7 @@ class simple_disk:
         else:
             ax = fig.axes[0]
         x = self.r_disk.flatten()
-        y = self.vkep_disk.flatten()
+        y = self.v0_disk.flatten()
         idxs = np.argsort(x)
         ax.plot(x[idxs], y[idxs])
         ax.set_xlabel('Radius [au]')
@@ -652,10 +962,12 @@ class simple_disk:
             fig, ax = plt.subplots()
         else:
             ax = fig.axes[0]
-        x = self.r_sky.flatten() * self.dist
-        y = self.dV.flatten()
+        x = self.r_sky_f.flatten()
+        y = self.dV_f.flatten()
         idxs = np.argsort(x)
-        ax.plot(x[idxs], y[idxs])
+        x, y = x[idxs], y[idxs]
+        mask = np.logical_and(x >= self.r_min, x <= self.r_max)
+        ax.plot(x[mask], y[mask])
         ax.set_xlabel('Radius [au]')
         ax.set_ylabel('Doppler Linewidth [m/s]')
         if top_axis:
@@ -672,10 +984,12 @@ class simple_disk:
             fig, ax = plt.subplots()
         else:
             ax = fig.axes[0]
-        x = self.r_sky.flatten() * self.dist
-        y = self.Tb.flatten()
+        x = self.r_sky_f.flatten()
+        y = self.Tb_f.flatten()
         idxs = np.argsort(x)
-        ax.plot(x[idxs], y[idxs])
+        x, y = x[idxs], y[idxs]
+        mask = np.logical_and(x >= self.r_min, x <= self.r_max)
+        ax.plot(x[mask], y[mask])
         ax.set_xlabel('Radius [au]')
         ax.set_ylabel('BrightestTemperature [K]')
         if top_axis:
@@ -684,7 +998,52 @@ class simple_disk:
                          ax.set_xlim()[1] / self.dist)
             ax2.set_xlabel('Radius [arcsec]')
 
-    def plot_radii(self, ax, rvals, contour_kwargs=None, projection='sky'):
+    def plot_tau(self, fig=None, top_axis=True):
+        """
+        Plot the optical depth profile.
+        """
+        if fig is None:
+            fig, ax = plt.subplots()
+        else:
+            ax = fig.axes[0]
+        x = self.r_sky_f.flatten()
+        y = self.tau.flatten()
+        idxs = np.argsort(x)
+        x, y = x[idxs], y[idxs]
+        mask = np.logical_and(x >= self.r_min, x <= self.r_max)
+        ax.plot(x[mask], y[mask])
+        ax.set_xlabel('Radius [au]')
+        ax.set_ylabel('Optical Depth')
+        if top_axis:
+            ax2 = ax.twiny()
+            ax2.set_xlim(ax.get_xlim()[0] / self.dist,
+                         ax.set_xlim()[1] / self.dist)
+            ax2.set_xlabel('Radius [arcsec]')
+
+    def plot_emission_surface(self, fig=None, top_axis=True):
+        """
+        Plot the emission surface.
+        """
+        if fig is None:
+            fig, ax = plt.subplots()
+        else:
+            ax = fig.axes[0]
+        x = self.r_sky_f.flatten()
+        y = self._z_func(x / self.dist) * self.dist
+        idxs = np.argsort(x)
+        x, y = x[idxs], y[idxs]
+        mask = np.logical_and(x >= self.r_min, x <= self.r_max)
+        ax.plot(x[mask], y[mask])
+        ax.set_xlabel('Radius [au]')
+        ax.set_ylabel('Emission Height [au]')
+        if top_axis:
+            ax2 = ax.twiny()
+            ax2.set_xlim(ax.get_xlim()[0] / self.dist,
+                         ax.set_xlim()[1] / self.dist)
+            ax2.set_xlabel('Radius [arcsec]')
+
+    def plot_radii(self, ax, rvals, contour_kwargs=None, projection='sky',
+                   side='f'):
         """
         Plot annular contours onto the axis.
         """
@@ -693,7 +1052,13 @@ class simple_disk:
         contour_kwargs['linewidths'] = contour_kwargs.pop('linewidths', 0.5)
         contour_kwargs['linestyles'] = contour_kwargs.pop('linestyles', '--')
         if projection.lower() == 'sky':
-            x, y, z = self.x_sky[0], self.y_sky[:, 0], self.r_sky
+            if 'f' in side:
+                r = self.r_sky_f
+            elif 'b' in side:
+                r = self.r_sky_b
+            else:
+                raise ValueError("Unknown 'side' value {}.".format(side))
+            x, y, z = self.x_sky[0], self.y_sky[:, 0], r / self.dist
         elif projection.lower() == 'disk':
             x, y, z = self.x_disk, self.y_disk, self.r_disk
         ax.contour(x, y, z, rvals, **contour_kwargs)
@@ -703,8 +1068,11 @@ class simple_disk:
         """
         Default formatting for sky image.
         """
+        from matplotlib.ticker import MaxNLocator
         ax.set_xlim(ax.get_xlim()[1], ax.get_xlim()[0])
         ax.set_ylim(ax.get_ylim()[0], ax.get_ylim()[1])
+        ax.xaxis.set_major_locator(MaxNLocator(5))
+        ax.yaxis.set_major_locator(MaxNLocator(5))
         ax.set_xlabel('Offset [arcsec]')
         ax.set_ylabel('Offset [arcsec]')
         ax.scatter(0, 0, marker='x', color='0.7', lw=1.0, s=4)
@@ -714,8 +1082,11 @@ class simple_disk:
         """
         Default formatting for disk image.
         """
+        from matplotlib.ticker import MaxNLocator
         ax.set_xlim(ax.get_xlim()[0], ax.get_xlim()[1])
         ax.set_ylim(ax.get_ylim()[0], ax.get_ylim()[1])
+        ax.xaxis.set_major_locator(MaxNLocator(5))
+        ax.yaxis.set_major_locator(MaxNLocator(5))
         ax.set_xlabel('Offset [au]')
         ax.set_ylabel('Offset [au]')
         ax.scatter(0, 0, marker='x', color='0.7', lw=1.0, s=4)
@@ -753,7 +1124,3 @@ class simple_disk:
                 self.x_sky[0, -1] * self.dist,
                 self.y_sky[0, 0] * self.dist,
                 self.y_sky[-1, 0] * self.dist]
-
-    @staticmethod
-    def powerlaw(x, x0, q):
-        return x0 * np.power(x, q)
