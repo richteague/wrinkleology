@@ -128,13 +128,14 @@ class simple_disk:
     def v0_sky(self):
         return self.v0_f
 
-    def _check_thermal_broadening(self):
+    def _check_thermal_broadening(self, mu=28.0):
         """
         Set the Doppler linewidth to the themral linewidth if no ``dV0`` or
-        ``dVq`` values are provided when instantiating the class.
+        ``dVq`` values are provided when instantiating the class. Can change
+        the molecular weight if necessary (assumes CO).
         """
         if self.dV0 is None:
-            self.dV0 = (2. * sc.k * self.Tb0 / self.mu / sc.m_p)**0.5
+            self.dV0 = (2. * sc.k * self.Tb0 / mu / sc.m_p)**0.5
         if self.dVq is None:
             self.dVq = 0.5 * self.Tbq
 
