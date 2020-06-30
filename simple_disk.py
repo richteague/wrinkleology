@@ -521,7 +521,7 @@ class simple_disk:
     # -- Pseudo Image Functions -- #
 
     def get_cube(self, velax, dv0=None, bmaj=None, bmin=None, bpa=0.0, rms=0.0,
-                 spectral_response=None):
+                 spectral_response=None, eval_at_center=True):
         """
         Return the pseudo-cube with the given velocity axis.
 
@@ -537,6 +537,9 @@ class simple_disk:
             spectral_response (optional[list]): The kernel to convolve the cube
                 with along the spectral dimension to simulation the spectral
                 response of the telescope.
+            eval_at_center (optional[bool]): Whether the brightness temperature
+                is evaluated at the channel center (``True``), or is the
+                integral across the channel (``False``).
 
         Returns:
             cube (array): A 3D image cube.
@@ -550,33 +553,34 @@ class simple_disk:
 
         # Make the image cube.
 
-        cube = np.array([self.get_channel(vbins[i], vbins[i+1], dv0)
+        c = np.array([self.get_channel(v_min=vbins[i], v_max=vbins[i+1],
+                                       dv0=dv0, eval_at_center=eval_at_center)
                          for i in range(velax.size)])
-        assert cube.shape[0] == velax.size, "not all channels created"
+        assert c.shape[0] == velax.size, "not all channels created"
 
         # Include convolution.
 
         beam = self._get_beam(bmaj, bmin, bpa) if bmaj is not None else None
         if beam is not None:
-            cube = simple_disk._convolve_cube(cube, beam)
+            c = simple_disk._convolve_cube(c, beam)
         if spectral_response is not None:
-            cube = np.convolve(cube, spectral_response, axis=0)
+            c = np.convolve(c, spectral_response, axis=0)
 
         # Add noise and return.
 
         if rms > 0.0:
-            noise = np.random.randn(cube.size).reshape(cube.shape)
+            noise = np.random.randn(c.size).reshape(c.shape)
             if beam is not None:
                 noise = simple_disk._convolve_cube(noise, beam)
             if spectral_response is not None:
                 noise = np.convolve(noise, spectral_response, axis=0)
             noise *= rms / np.std(noise)
         else:
-            noise = np.zeros(cube.shape)
-        return cube + noise
+            noise = np.zeros(c.shape)
+        return c + noise
 
     def get_channel(self, v_min, v_max, dv0=None, bmaj=None, bmin=None,
-                    bpa=0.0, rms=0.0):
+                    bpa=0.0, rms=0.0, eval_at_center=True):
         """
         Calculate the channel emission in [K]. Can include velocity
         perturbations with the `dv0` parameter. To simulate observations this
@@ -593,6 +597,9 @@ class simple_disk:
                 only `bmaj` is specified, will assume a circular beam.
             bpa (optional[float]): Beam position angle in [deg].
             rms (optional[float]): RMS of the noise to add to the image.
+            eval_at_center (optional[bool]): Whether the brightness temperature
+                is evaluated at the channel center (``True``), or is the
+                integral across the channel (``False``).
 
         Returns:
             channel (ndarray): A synthesied channel map in [K].
@@ -615,13 +622,13 @@ class simple_disk:
 
         # Calculate the flux from the front side of the disk.
 
-        flux_f = self._calc_flux(v_min, v_max, dv0_f, 'f')
+        flux_f = self._calc_flux(v_min, v_max, dv0_f, 'f', eval_at_center)
 
         # If `z0 != 0.0`, can combine the front and far sides based on a
         # two-slab approximation.
 
         if not self._flat_disk:
-            flux_b = self._calc_flux(v_min, v_max, dv0_b, 'b')
+            flux_b = self._calc_flux(v_min, v_max, dv0_b, 'b', eval_at_center)
             frac_f, frac_b = self._calc_frac(v_min, v_max, dv0_b)
             flux = frac_f * flux_f + frac_b * flux_b
         else:
@@ -642,7 +649,7 @@ class simple_disk:
         return flux + noise
 
     def get_channel_tau(self, v_min, v_max, dv0=0.0, bmaj=None, bmin=None,
-                        bpa=0.0):
+                        bpa=0.0, eval_at_center=True):
         """
         As ``get_channel``, but returns the optical depth of the front side of
         the disk.
@@ -656,6 +663,9 @@ class simple_disk:
             bmin (optional[float]): Synthesised beam minor axis in [arcsec]. If
                 only `bmaj` is specified, will assume a circular beam.
             bpa (optional[float]): Beam position angle in [deg].
+            eval_at_center (optional[bool]): Whether the optical depth is
+                evaluated at the channel center (``True``), or is the integral
+                across the channel (``False``).
 
         Returns:
             channel (ndarray): A synthesied channel map representing the
@@ -669,7 +679,8 @@ class simple_disk:
 
         # Calculate the optical depth.
 
-        tau = self._calc_tau(v_min=v_min, v_max=v_max, dv0=dv0)
+        tau = self._calc_tau(v_min=v_min, v_max=v_max, dv0=dv0,
+                             eval_at_center=eval_at_center)
 
         # Include a beam convolution if necessary.
 
@@ -678,15 +689,17 @@ class simple_disk:
             tau = convolve(tau, beam)
         return tau
 
-    def _calc_tau(self, v_min, v_max, dv0=0.0):
+    def _calc_tau(self, v_min, v_max, dv0=0.0, eval_at_center=True):
         """
         Calculate the average tau profile assuming a single Gaussian component.
         """
         tau, dV, v0 = self.tau, self.dV_f, self.v0_f + dv0
+        if eval_at_center:
+            return tau * np.exp(-((np.mean(v_min, v_max) - v0) / dV)**2)
         f = tau * np.pi**0.5 * dV / 2.0 / (v_max - v_min)
         return f * (erf((v0 - v_min) / dV) - erf((v0 - v_max) / dV))
 
-    def _calc_flux(self, v_min, v_max, dv0=0.0, side='f'):
+    def _calc_flux(self, v_min, v_max, dv0=0.0, side='f', eval_at_center=True):
         """
         Calculate the emergent flux assuming single Gaussian component.
         """
@@ -697,6 +710,8 @@ class simple_disk:
         else:
             quote = "Unknown 'side' value {}. Must be 'f' or 'r'."
             raise ValueError(quote.format(side))
+        if eval_at_center:
+            return Tb * np.exp(-((np.mean([v_min, v_max]) - v0) / dV)**2)
         f = Tb * np.pi**0.5 * dV / 2.0 / (v_max - v_min)
         return f * (erf((v0 - v_min) / dV) - erf((v0 - v_max) / dV))
 
