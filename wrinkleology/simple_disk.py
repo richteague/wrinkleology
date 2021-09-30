@@ -317,13 +317,16 @@ class simple_disk:
                          self.tau_f[None, :, :])
         Tb_f = self.Tb_f / (1.0 - np.exp(-self.tau_f))
         Tb_f = Tb_f[None, :, :] * (1.0 - np.exp(-tau_f))
+        Tb_f = np.where(np.isfinite(Tb_f), Tb_f, 0.0)
         tau_b = gaussian(velax[:, None, None],
                          self.vtheta_b_proj[None, :, :] + vlsr,
                          self.dV_b[None, :, :] / np.sqrt(2.0),
                          self.tau_b[None, :, :])
         Tb_b = self.Tb_b / (1.0 - np.exp(-self.tau_b))
         Tb_b = Tb_b[None, :, :] * (1.0 - np.exp(-tau_b))
-        return Tb_f + Tb_b * np.exp(-tau_f)
+        Tb_b = Tb_b * np.exp(-tau_f)
+        Tb_b = np.where(np.isfinite(Tb_b), Tb_b, 0.0)
+        return Tb_f + Tb_b
 
     # -- plotting convenience functions -- #
 
