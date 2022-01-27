@@ -295,12 +295,12 @@ class simple_disk:
     @property
     def vtheta_f_proj(self):
         vt = self.vtheta_f * np.cos(self.t_disk_f)
-        return vt * np.sin(np.radians(self.inc))
+        return vt * np.sin(abs(np.radians(self.inc)))
 
     @property
     def vtheta_b_proj(self):
         vt = self.vtheta_b * np.cos(self.t_disk_b)
-        return vt * np.sin(np.radians(self.inc))
+        return vt * np.sin(abs(np.radians(self.inc)))
 
     def get_cube(self, velax, vlsr=0.0):
         """
