@@ -27,6 +27,10 @@ class simple_disk:
     def set_sky_coords(self, FOV, npix):
         """
         Populate the sky frame pixel coordinates. Distances in [arcsec].
+
+        Args:
+            FOV (float): Field of view in [arcsec].
+            npix (int): Number of pixel on each image side.
         """
         self.x_sky = np.linspace(-FOV / 2.0, FOV / 2.0, npix)
         self.x_sky, self.y_sky = np.meshgrid(self.x_sky, self.x_sky)
